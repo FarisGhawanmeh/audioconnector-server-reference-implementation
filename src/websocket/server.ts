@@ -35,19 +35,29 @@ export class Server {
       console.log("==========================");
       // ==================================
 
-      verifyRequestSignature(request, this.secretService).then((verifyResult) => {
-        if (verifyResult.code !== "VERIFIED") {
-          console.log("Authentication failed, closing the connection.");
-          socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-          socket.destroy();
-          return;
-        }
+      verifyRequestSignature(request, this.secretService)
+        .then((verifyResult) => {
+          // ✅ NEW: print the real reason verification failed
+          console.log("VERIFY RESULT:", verifyResult);
 
-        this.wsServer.handleUpgrade(request, socket, head, (ws: WebSocket) => {
-          console.log("Authentication was successful.");
-          this.wsServer.emit("connection", ws, request);
+          if (verifyResult.code !== "VERIFIED") {
+            console.log("Authentication failed, closing the connection.");
+            socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+            socket.destroy();
+            return;
+          }
+
+          this.wsServer.handleUpgrade(request, socket, head, (ws: WebSocket) => {
+            console.log("Authentication was successful.");
+            this.wsServer.emit("connection", ws, request);
+          });
+        })
+        .catch((err) => {
+          // Catch unexpected errors so the socket isn't left hanging
+          console.error("verifyRequestSignature threw an error:", err);
+          socket.write("HTTP/1.1 500 Internal Server Error\r\n\r\n");
+          socket.destroy();
         });
-      });
     });
 
     this.wsServer.on("connection", (ws: WebSocket, request: Request) => {
@@ -69,8 +79,11 @@ export class Server {
         if (!session) {
           const sessionId = request.headers["audiohook-session-id"] as string | undefined;
 
-          // Fail fast with a clear message if session id is missing
-          const dummySession = new Session(ws, sessionId ?? "missing-audiohook-session-id", request.url);
+          const dummySession = new Session(
+            ws,
+            sessionId ?? "missing-audiohook-session-id",
+            request.url
+          );
           console.log("Session does not exist.");
           dummySession.sendDisconnect("error", "Session does not exist.", {});
           return;
