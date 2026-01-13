@@ -15,7 +15,6 @@ import {
   parseDictionaryField,
 } from './structured-fields';
 
-// Maximum clock skew we allow between the client and server clock.
 const MAX_CLOCK_SKEW = 3;
 
 export type HeaderFields = Record<string, string | string[] | undefined>;
@@ -41,7 +40,6 @@ export type SignatureParameters = {
   nonce?: string;
 };
 
-// https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-message-signatures-11#section-6.4
 export type SignatureComponentParameter =
   | { key: 'key'; value: string }
   | { key: 'name'; value: string }
@@ -88,9 +86,7 @@ export type VerifyResultFailure = {
   reason?: string;
 };
 
-export type VerifyResultSuccess = {
-  code: 'VERIFIED';
-};
+export type VerifyResultSuccess = { code: 'VERIFIED' };
 
 export type VerifyResult = VerifyResultFailure | VerifyResultSuccess;
 
@@ -137,27 +133,28 @@ const querySignatureHeaderField = (headers: HeaderFields, name: string): Diction
   return value ? parseDictionaryField(value) : new Map();
 };
 
-// ✅ helper: try multiple encodings for secret (UTF8 / Base64 / Base64URL / Hex)
+// ✅ try multiple encodings of the env secret
 function getCandidateKeysFromEnv(): { label: string; key: Uint8Array }[] {
-  const secret =
-    (process.env.GENESYS_AUDIO_CONNECTOR_SECRET ??
-      process.env.AUDIOHOOK_CLIENT_SECRET ??
-      '').trim();
+  const secret = (
+    process.env.GENESYS_AUDIO_CONNECTOR_SECRET ??
+    process.env.AUDIOHOOK_CLIENT_SECRET ??
+    ''
+  ).trim();
 
   if (!secret) return [];
 
   const keys: { label: string; key: Uint8Array }[] = [];
 
-  // 1) raw utf8
+  // raw utf8
   keys.push({ label: 'utf8', key: Buffer.from(secret, 'utf8') });
 
-  // 2) base64 (only if it decodes)
+  // base64
   try {
     const b = Buffer.from(secret, 'base64');
     if (b.length > 0) keys.push({ label: 'base64', key: b });
   } catch {}
 
-  // 3) base64url (replace -_ and pad)
+  // base64url
   try {
     let s = secret.replace(/-/g, '+').replace(/_/g, '/');
     while (s.length % 4 !== 0) s += '=';
@@ -165,7 +162,7 @@ function getCandidateKeysFromEnv(): { label: string; key: Uint8Array }[] {
     if (b.length > 0) keys.push({ label: 'base64url', key: b });
   } catch {}
 
-  // 4) hex (only if looks like hex)
+  // hex
   try {
     if (/^[0-9a-fA-F]+$/.test(secret) && secret.length % 2 === 0) {
       const b = Buffer.from(secret, 'hex');
@@ -173,7 +170,7 @@ function getCandidateKeysFromEnv(): { label: string; key: Uint8Array }[] {
     }
   } catch {}
 
-  // de-dup by bytes
+  // de-dup
   const seen = new Set<string>();
   const out: { label: string; key: Uint8Array }[] = [];
   for (const k of keys) {
@@ -217,8 +214,10 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
   if (signatureFields.size === 0) return withFailure('INVALID', 'Found "signature-input" but no "signature" header field');
 
   const signatures: SignatureInfo[] = [];
+
   for (const [label, signatureBase] of signatureInputFields) {
     const signatureItem = signatureFields.get(label);
+
     if (!signatureItem) return withFailure('INVALID', `Signature with label ${encodeBareItem(label)} not found`);
     if (!isItem(signatureItem) || !isByteSequence(signatureItem.value)) {
       return withFailure('INVALID', `Invalid "signature" header field value (label: ${encodeBareItem(label)})`);
@@ -269,7 +268,7 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
           parameters.nonce = value;
           break;
         default:
-          return withFailure('INVALID', `Invalid "signature-input" header field value (unknown parameter ${encodeBareItem(key)})`);
+          return withFailure('INVALID', `Unknown parameter ${encodeBareItem(key)}`);
       }
     }
 
@@ -291,7 +290,6 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
   // Expiration checks
   if (parameters.created || parameters.expires || maxSignatureAge) {
     const now = options.expirationTimeProvider?.(parameters) ?? Date.now() / 1000;
-
     if (parameters.created && parameters.created > now + MAX_CLOCK_SKEW) {
       return withFailure('PRECONDITION', 'Invalid "created" parameter value (time in the future)');
     }
@@ -306,8 +304,8 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
 
   // Build signing string
   const remaining = new Set(requiredComponents);
-  const seen = new Set<string>();
   const inputLines: string[] = [];
+  const seen = new Set<string>();
 
   for (const { name, params } of components) {
     const encoded = encodeItem({ value: name, params });
@@ -321,7 +319,7 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
         derivedComponentLookup?.(name as DerivedComponentTag) ??
         (name === '@authority' ? queryCanonicalizedHeaderField(headerFields, 'host') : null);
 
-      if (!resolved) return withFailure('PRECONDITION', `Cannot resolve reference to ${encoded} component`);
+      if (!resolved) return withFailure('PRECONDITION', `Cannot resolve reference to ${encoded}`);
     } else {
       resolved = queryCanonicalizedHeaderField(headerFields, name);
       if (!resolved) return withFailure('PRECONDITION', `Header field ${encodeBareItem(name)} not present`);
@@ -332,13 +330,12 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
   }
 
   if (remaining.size) {
-    return withFailure('PRECONDITION', `Signature does not cover required component(s): ${[...remaining].map(encodeBareItem).join(',')}`);
+    return withFailure('PRECONDITION', `Missing required components: ${[...remaining].map(encodeBareItem).join(',')}`);
   }
 
   inputLines.push(`"@signature-params": ${encodeInnerList(signatureBase)}`);
   const signingData = inputLines.join('\n');
 
-  // ===== DEBUG =====
   console.log('===== SIGNATURE DEBUG =====');
   console.log('keyid:', parameters.keyid);
   console.log('alg:', parameters.alg);
@@ -347,28 +344,26 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
   console.log('----- SIGNING DATA START -----');
   console.log(signingData);
   console.log('----- SIGNING DATA END -----');
-  // =================
 
   const resolverResult = await keyResolver(parameters);
   if (resolverResult.code !== 'GOODKEY' && resolverResult.code !== 'BADKEY') return resolverResult;
 
   const alg = resolverResult.alg ?? parameters.alg ?? 'hmac-sha256';
-  if (alg !== 'hmac-sha256') return withFailure('UNSUPPORTED', `Signature algorithm ${encodeBareItem(alg)} is not supported`);
+  if (alg !== 'hmac-sha256') return withFailure('UNSUPPORTED', `Unsupported alg ${encodeBareItem(alg)}`);
 
-  // Compute with resolver key
   const computed = createHmac('sha256', resolverResult.key).update(signingData).digest();
-  const receivedB64 = Buffer.from(signature).toString('base64');
-  const computedB64 = Buffer.from(computed).toString('base64');
 
-  console.log('RECEIVED signature (base64):', receivedB64);
-  console.log('COMPUTED signature (base64):', computedB64);
+  console.log('RECEIVED signature (base64):', Buffer.from(signature).toString('base64'));
+  console.log('COMPUTED signature (base64):', Buffer.from(computed).toString('base64'));
 
   if (timingSafeEqual(signature, computed)) {
     return resolverResult.code === 'GOODKEY' ? { code: 'VERIFIED' } : withFailure('FAILED', 'Signatures do not match');
   }
 
-  // ✅ Fallback: try candidate encodings of env secret
+  // ✅ Confirm fallback is running
   const candidates = getCandidateKeysFromEnv();
+  console.log('DEBUG: candidates tried =', candidates.map((x) => x.label));
+
   for (const c of candidates) {
     const alt = createHmac('sha256', c.key).update(signingData).digest();
     if (timingSafeEqual(signature, alt)) {
