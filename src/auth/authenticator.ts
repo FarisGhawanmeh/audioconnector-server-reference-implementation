@@ -31,18 +31,17 @@ async function verifyRequestSignatureImpl(request: Request, secretService: Secre
     ],
     maxSignatureAge: 10,
 
-    // ✅ FIX: @request-target must be ONLY the request-target (path + query), NOT "get <path>"
-    derivedComponentLookup: (name: string) => {
+    // IMPORTANT: Genesys expects @request-target to be the path (no method)
+    derivedComponentLookup: (name: any) => {
       if (name === '@request-target') {
-        return request.url ?? null; // مثال: /openai-voice-bot
+        return request.url ?? null; // "/openai-voice-bot"
       }
       return null;
     },
 
     keyResolver: async (parameters: SignatureParameters) => {
       if (!parameters.nonce) return withFailure('PRECONDITION', 'Missing "nonce" signature parameter');
-      if (parameters.nonce.length < 22)
-        return withFailure('PRECONDITION', 'Provided "nonce" signature parameter is too small');
+      if (parameters.nonce.length < 22) return withFailure('PRECONDITION', 'Provided "nonce" signature parameter is too small');
 
       const keyId = parameters.keyid;
       if (!keyId) return withFailure('PRECONDITION', 'Missing "keyid" signature parameter');
@@ -60,7 +59,6 @@ async function verifyRequestSignatureImpl(request: Request, secretService: Secre
     },
   });
 
-  // If the request is unsigned, allow it (for dev / local)
   if (result.code === 'UNSIGNED') {
     return { code: 'VERIFIED' };
   }
