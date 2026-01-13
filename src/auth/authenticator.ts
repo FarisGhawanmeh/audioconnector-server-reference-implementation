@@ -4,7 +4,6 @@ import {
   verifySignature,
   withFailure,
   queryCanonicalizedHeaderField,
-  DerivedComponentTag,
   SignatureParameters,
 } from './signature-verifier';
 import { SecretService } from '../services/secret-service';
@@ -31,17 +30,19 @@ async function verifyRequestSignatureImpl(request: Request, secretService: Secre
       'x-api-key',
     ],
     maxSignatureAge: 10,
-derivedComponentLookup: (name: string) => {
-  if (name === '@request-target') {
-    const method = ((request as any).method ?? 'GET').toLowerCase();
-    const url = request.url ?? '';
-    return `${method} ${url}`;
-  }
-  return null;
-},
+
+    // ✅ FIX: @request-target must be ONLY the request-target (path + query), NOT "get <path>"
+    derivedComponentLookup: (name: string) => {
+      if (name === '@request-target') {
+        return request.url ?? null; // مثال: /openai-voice-bot
+      }
+      return null;
+    },
+
     keyResolver: async (parameters: SignatureParameters) => {
       if (!parameters.nonce) return withFailure('PRECONDITION', 'Missing "nonce" signature parameter');
-      if (parameters.nonce.length < 22) return withFailure('PRECONDITION', 'Provided "nonce" signature parameter is too small');
+      if (parameters.nonce.length < 22)
+        return withFailure('PRECONDITION', 'Provided "nonce" signature parameter is too small');
 
       const keyId = parameters.keyid;
       if (!keyId) return withFailure('PRECONDITION', 'Missing "keyid" signature parameter');
@@ -59,6 +60,7 @@ derivedComponentLookup: (name: string) => {
     },
   });
 
+  // If the request is unsigned, allow it (for dev / local)
   if (result.code === 'UNSIGNED') {
     return { code: 'VERIFIED' };
   }
