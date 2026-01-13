@@ -25,7 +25,6 @@ export class Server {
     this.httpServer.on("upgrade", (request: Request, socket: any, head: any) => {
       console.log(`Received a connection request from ${request.url}.`);
 
-      // ===== AUTH DEBUG (temporary) =====
       console.log("=== AUTH DEBUG HEADERS ===");
       console.log("url:", request.url);
       console.log("x-api-key:", request.headers["x-api-key"]);
@@ -37,7 +36,6 @@ export class Server {
 
       verifyRequestSignature(request, this.secretService)
         .then((verifyResult) => {
-          // ✅ NEW: print the real reason verification failed
           console.log("VERIFY RESULT:", verifyResult);
 
           if (verifyResult.code !== "VERIFIED") {
@@ -53,7 +51,6 @@ export class Server {
           });
         })
         .catch((err) => {
-          // Catch unexpected errors so the socket isn't left hanging
           console.error("verifyRequestSignature threw an error:", err);
           socket.write("HTTP/1.1 500 Internal Server Error\r\n\r\n");
           socket.destroy();
@@ -118,7 +115,6 @@ export class Server {
     try {
       session.close();
     } catch {
-      // ignore
     }
 
     console.log("Deleting session.");
