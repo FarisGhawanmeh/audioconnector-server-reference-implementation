@@ -163,15 +163,22 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
   }
 
   if (signatureInputFields.size === 0) {
-    if (signatureFields.size === 0) return withFailure('UNSIGNED', 'No "signature" and "signature-input" header fields');
+    if (signatureFields.size === 0) {
+      return withFailure('UNSIGNED', 'No "signature" and "signature-input" header fields');
+    }
     return withFailure('INVALID', 'Found "signature" but no "signature-input" header field');
   }
-  if (signatureFields.size === 0) return withFailure('INVALID', 'Found "signature-input" but no "signature" header field');
+  if (signatureFields.size === 0) {
+    return withFailure('INVALID', 'Found "signature-input" but no "signature" header field');
+  }
 
   const signatures: SignatureInfo[] = [];
   for (const [label, signatureBase] of signatureInputFields) {
     const signatureItem = signatureFields.get(label);
-    if (!signatureItem) return withFailure('INVALID', `Signature with label ${encodeBareItem(label)} not found`);
+
+    if (!signatureItem) {
+      return withFailure('INVALID', `Signature with label ${encodeBareItem(label)} not found`);
+    }
     if (!isItem(signatureItem) || !isByteSequence(signatureItem.value)) {
       return withFailure('INVALID', `Invalid "signature" header field value (label: ${encodeBareItem(label)})`);
     }
@@ -181,21 +188,29 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
 
     const components: SignatureComponent[] = [];
     for (const { value, params } of signatureBase.value) {
-      if (!isString(value)) return withFailure('INVALID', 'Invalid "signature-input" header field value');
+      if (!isString(value)) {
+        return withFailure('INVALID', 'Invalid "signature-input" header field value');
+      }
 
       if (params) {
         const ok = params.every(({ key, value }) => {
           const validator = (signatureComponentParameterValidator as any)[key];
           return typeof validator === 'function' ? validator(value) : false;
         });
-        if (!ok) return withFailure('INVALID', `Invalid signature component: ${encodeItem({ value, params })}`);
+
+        if (!ok) {
+          return withFailure('INVALID', `Invalid signature component: ${encodeItem({ value, params })}`);
+        }
+
         components.push({ name: value, params: params as SignatureComponentParameter[] });
       } else {
         components.push({ name: value });
       }
     }
 
-    if (!signatureBase.params) return withFailure('INVALID', 'Invalid "signature-input" header field value (no parameters)');
+    if (!signatureBase.params) {
+      return withFailure('INVALID', 'Invalid "signature-input" header field value (no parameters)');
+    }
 
     const parameters: SignatureParameters = {};
     for (const { key, value } of signatureBase.params) {
@@ -204,24 +219,32 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
           if (!isString(value)) return withFailure('INVALID', 'Invalid "alg" parameter');
           parameters.alg = value;
           break;
+
         case 'created':
           if (!isInteger(value) || value < 0) return withFailure('INVALID', 'Invalid "created" parameter');
           parameters.created = value;
           break;
+
         case 'expires':
           if (!isInteger(value) || value < 0) return withFailure('INVALID', 'Invalid "expires" parameter');
           parameters.expires = value;
           break;
+
         case 'keyid':
           if (!isString(value)) return withFailure('INVALID', 'Invalid "keyid" parameter');
           parameters.keyid = value;
           break;
+
         case 'nonce':
           if (!isString(value)) return withFailure('INVALID', 'Invalid "nonce" parameter');
           parameters.nonce = value;
           break;
+
         default:
-          return withFailure('INVALID', `Invalid "signature-input" header field value (unknown parameter ${encodeBareItem(key)})`);
+          return withFailure(
+            'INVALID',
+            `Invalid "signature-input" header field value (unknown parameter ${encodeBareItem(key)})`
+          );
       }
     }
 
@@ -235,7 +258,9 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
   }
 
   const chosenLabel = signatureSelector ? signatureSelector(signatures) : signatures[0].label;
-  if (!chosenLabel) return withFailure('PRECONDITION', 'Multiple signatures and none met selection criteria');
+  if (!chosenLabel) {
+    return withFailure('PRECONDITION', 'Multiple signatures and none met selection criteria');
+  }
 
   const chosen = signatures.find((x) => x.label === chosenLabel) ?? signatures[0];
   const { parameters, components, signatureBase, signature } = chosen;
@@ -284,19 +309,43 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
   }
 
   if (remaining.size) {
-    return withFailure('PRECONDITION', `Signature does not cover required component(s): ${[...remaining].map(encodeBareItem).join(',')}`);
+    return withFailure(
+      'PRECONDITION',
+      `Signature does not cover required component(s): ${[...remaining].map(encodeBareItem).join(',')}`
+    );
   }
 
   inputLines.push(`"@signature-params": ${encodeInnerList(signatureBase)}`);
   const signingData = inputLines.join('\n');
 
+  // ===== DEBUG: show what we are signing =====
+  console.log('===== SIGNATURE DEBUG =====');
+  console.log('keyid:', parameters.keyid);
+  console.log('alg:', parameters.alg);
+  console.log('created:', parameters.created);
+  console.log('expires:', parameters.expires);
+  console.log('----- SIGNING DATA START -----');
+  console.log(signingData);
+  console.log('----- SIGNING DATA END -----');
+  console.log('=============================');
+  // ==========================================
+
   const resolverResult = await keyResolver(parameters);
   if (resolverResult.code !== 'GOODKEY' && resolverResult.code !== 'BADKEY') return resolverResult;
 
   const alg = resolverResult.alg ?? parameters.alg ?? 'hmac-sha256';
-  if (alg !== 'hmac-sha256') return withFailure('UNSUPPORTED', `Signature algorithm ${encodeBareItem(alg)} is not supported`);
+  if (alg !== 'hmac-sha256') {
+    return withFailure('UNSUPPORTED', `Signature algorithm ${encodeBareItem(alg)} is not supported`);
+  }
 
   const computed = createHmac('sha256', resolverResult.key).update(signingData).digest();
+
+  // ===== DEBUG: compare signatures =====
+  const receivedB64 = Buffer.from(signature).toString('base64');
+  const computedB64 = Buffer.from(computed).toString('base64');
+  console.log('RECEIVED signature (base64):', receivedB64);
+  console.log('COMPUTED signature (base64):', computedB64);
+  // =====================================
 
   if (timingSafeEqual(signature, computed)) {
     return resolverResult.code === 'GOODKEY' ? { code: 'VERIFIED' } : withFailure('FAILED', 'Signatures do not match');
