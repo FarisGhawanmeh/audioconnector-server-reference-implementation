@@ -1,38 +1,121 @@
-/**
- * SecretService resolves the HMAC secret for a given keyid (x-api-key).
- * Genesys Audio Connector "Client Secret" is base64-encoded — we must decode it.
- */
-export class SecretService {
-  getSecretForKey(keyId: string): Uint8Array {
-    const envKeyId = (process.env.GENESYS_AUDIO_CONNECTOR_KEY_ID ?? process.env.AUDIOHOOK_API_KEY ?? '').trim();
-    const envSecretB64 = (process.env.GENESYS_AUDIO_CONNECTOR_SECRET ?? process.env.AUDIOHOOK_CLIENT_SECRET ?? '').trim();
+import WS, { WebSocket } from "ws";
+import express, { Express, Request } from "express";
+import { verifyRequestSignature } from "../auth/authenticator";
+import { Session } from "../common/session";
+import { getPort } from "../common/environment-variables";
+import { SecretService } from "../services/secret-service";
 
-    if (!envKeyId || !envSecretB64) {
-      console.error(
-        'SecretService: Missing env vars. Need GENESYS_AUDIO_CONNECTOR_KEY_ID + GENESYS_AUDIO_CONNECTOR_SECRET (or AUDIOHOOK_API_KEY + AUDIOHOOK_CLIENT_SECRET).'
-      );
-      return new Uint8Array();
-    }
+export class Server {
+  private app: Express | undefined;
+  private httpServer: any;
+  private wsServer: any;
+  private sessionMap: Map<WebSocket, Session> = new Map();
+  private secretService = new SecretService();
 
-    if (keyId !== envKeyId) {
-      console.error(`SecretService: keyid mismatch. Got "${keyId}", expected "${envKeyId}".`);
-      return new Uint8Array();
-    }
+  start() {
+    console.log(`Starting server on port: ${getPort()}`);
+
+    this.app = express();
+    this.httpServer = this.app.listen(getPort());
+
+    this.wsServer = new WebSocket.Server({ noServer: true });
+
+    this.httpServer.on("upgrade", (request: Request, socket: any, head: any) => {
+      console.log(`Received a connection request from ${request.url}.`);
+
+      // ===== AUTH DEBUG (temporary) =====
+      console.log("=== AUTH DEBUG HEADERS ===");
+      console.log("url:", request.url);
+      console.log("x-api-key:", request.headers["x-api-key"]);
+      console.log("authorization:", request.headers["authorization"]);
+      console.log("date:", request.headers["date"]);
+      console.log("all headers:", request.headers);
+      console.log("==========================");
+      // ==================================
+
+      verifyRequestSignature(request, this.secretService)
+        .then((verifyResult) => {
+          console.log("VERIFY RESULT:", verifyResult);
+
+          if (verifyResult.code !== "VERIFIED") {
+            console.log("Authentication failed, closing the connection.");
+            socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+            socket.destroy();
+            return;
+          }
+
+          this.wsServer.handleUpgrade(request, socket, head, (ws: WebSocket) => {
+            console.log("Authentication was successful.");
+            this.wsServer.emit("connection", ws, request);
+          });
+        })
+        .catch((err) => {
+          console.error("verifyRequestSignature threw an error:", err);
+          socket.write("HTTP/1.1 500 Internal Server Error\r\n\r\n");
+          socket.destroy();
+        });
+    });
+
+    this.wsServer.on("connection", (ws: WebSocket, request: Request) => {
+      ws.on("close", () => {
+        console.log("WebSocket connection closed.");
+        this.deleteConnection(ws);
+      });
+
+      ws.on("error", (error: Error) => {
+        console.log(`WebSocket Error: ${error}`);
+        ws.close();
+      });
+
+      ws.on("message", (data: WS.RawData, isBinary: boolean) => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+
+        const session = this.sessionMap.get(ws);
+
+        if (!session) {
+          const sessionId = request.headers["audiohook-session-id"] as string | undefined;
+          const dummySession = new Session(
+            ws,
+            sessionId ?? "missing-audiohook-session-id",
+            request.url
+          );
+          console.log("Session does not exist.");
+          dummySession.sendDisconnect("error", "Session does not exist.", {});
+          return;
+        }
+
+        if (isBinary) {
+          session.processBinaryMessage(data as Uint8Array);
+        } else {
+          session.processTextMessage(data.toString());
+        }
+      });
+
+      this.createConnection(ws, request);
+    });
+  }
+
+  private createConnection(ws: WebSocket, request: Request) {
+    if (this.sessionMap.has(ws)) return;
+
+    const sessionId = request.headers["audiohook-session-id"] as string | undefined;
+    const session = new Session(ws, sessionId ?? "missing-audiohook-session-id", request.url);
+
+    console.log("Creating a new session.");
+    this.sessionMap.set(ws, session);
+  }
+
+  private deleteConnection(ws: WebSocket) {
+    const session = this.sessionMap.get(ws);
+    if (!session) return;
 
     try {
-      // IMPORTANT: decode base64 -> raw bytes for HMAC
-      const decoded = Buffer.from(envSecretB64, 'base64');
-
-      // quick sanity check (base64 decode should not be empty)
-      if (!decoded || decoded.length === 0) {
-        console.error('SecretService: base64 decoded secret is empty. Check the secret value.');
-        return new Uint8Array();
-      }
-
-      return decoded;
-    } catch (e) {
-      console.error('SecretService: Failed to base64 decode secret.', e);
-      return new Uint8Array();
+      session.close();
+    } catch {
+      // ignore
     }
+
+    console.log("Deleting session.");
+    this.sessionMap.delete(ws);
   }
 }
