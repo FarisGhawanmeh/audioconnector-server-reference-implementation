@@ -31,14 +31,14 @@ async function verifyRequestSignatureImpl(request: Request, secretService: Secre
       'x-api-key',
     ],
     maxSignatureAge: 10,
-    derivedComponentLookup: (name: DerivedComponentTag) => {
-      if (name === '@request-target') return request.url ?? null;
-      if (name === '@authority') {
-        const host = request.headers['host'];
-        return typeof host === 'string' && host.length > 0 ? host : null;
-      }
-      return null;
-    },
+derivedComponentLookup: (name: string) => {
+  if (name === '@request-target') {
+    const method = ((request as any).method ?? 'GET').toLowerCase();
+    const url = request.url ?? '';
+    return `${method} ${url}`;
+  }
+  return null;
+},
     keyResolver: async (parameters: SignatureParameters) => {
       if (!parameters.nonce) return withFailure('PRECONDITION', 'Missing "nonce" signature parameter');
       if (parameters.nonce.length < 22) return withFailure('PRECONDITION', 'Provided "nonce" signature parameter is too small');
