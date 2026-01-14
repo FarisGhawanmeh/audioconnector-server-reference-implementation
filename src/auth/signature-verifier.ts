@@ -134,9 +134,13 @@ export const queryCanonicalizedHeaderField = (headers: HeaderFields, name: strin
 
 const querySignatureHeaderField = (headers: HeaderFields, name: string): Dictionary => {
   const value = headers[name];
-  // field value canonicalized implicitly by parser
   return value ? parseDictionaryField(value) : new Map();
 };
+
+function b64UrlToStd(b64: string): string {
+  // convert base64url -> base64
+  return b64.replace(/-/g, '+').replace(/_/g, '/');
+}
 
 export const verifySignature = async (options: VerifierOptions): Promise<VerifyResult> => {
   const {
@@ -163,20 +167,16 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
   }
 
   if (signatureInputFields.size === 0) {
-    if (signatureFields.size === 0)
-      return withFailure('UNSIGNED', 'No "signature" and "signature-input" header fields');
+    if (signatureFields.size === 0) return withFailure('UNSIGNED', 'No "signature" and "signature-input" header fields');
     return withFailure('INVALID', 'Found "signature" but no "signature-input" header field');
   }
-  if (signatureFields.size === 0)
-    return withFailure('INVALID', 'Found "signature-input" but no "signature" header field');
+  if (signatureFields.size === 0) return withFailure('INVALID', 'Found "signature-input" but no "signature" header field');
 
   const signatures: SignatureInfo[] = [];
   for (const [label, signatureBase] of signatureInputFields) {
     const signatureItem = signatureFields.get(label);
 
-    if (!signatureItem) {
-      return withFailure('INVALID', `Signature with label ${encodeBareItem(label)} not found`);
-    }
+    if (!signatureItem) return withFailure('INVALID', `Signature with label ${encodeBareItem(label)} not found`);
     if (!isItem(signatureItem) || !isByteSequence(signatureItem.value)) {
       return withFailure('INVALID', `Invalid "signature" header field value (label: ${encodeBareItem(label)})`);
     }
@@ -186,29 +186,21 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
 
     const components: SignatureComponent[] = [];
     for (const { value, params } of signatureBase.value) {
-      if (!isString(value)) {
-        return withFailure('INVALID', 'Invalid "signature-input" header field value');
-      }
+      if (!isString(value)) return withFailure('INVALID', 'Invalid "signature-input" header field value');
 
       if (params) {
         const ok = params.every(({ key, value }) => {
           const validator = (signatureComponentParameterValidator as any)[key];
           return typeof validator === 'function' ? validator(value) : false;
         });
-
-        if (!ok) {
-          return withFailure('INVALID', `Invalid signature component: ${encodeItem({ value, params })}`);
-        }
-
+        if (!ok) return withFailure('INVALID', `Invalid signature component: ${encodeItem({ value, params })}`);
         components.push({ name: value, params: params as SignatureComponentParameter[] });
       } else {
         components.push({ name: value });
       }
     }
 
-    if (!signatureBase.params) {
-      return withFailure('INVALID', 'Invalid "signature-input" header field value (no parameters)');
-    }
+    if (!signatureBase.params) return withFailure('INVALID', 'Invalid "signature-input" header field value (no parameters)');
 
     const parameters: SignatureParameters = {};
     for (const { key, value } of signatureBase.params) {
@@ -217,32 +209,24 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
           if (!isString(value)) return withFailure('INVALID', 'Invalid "alg" parameter');
           parameters.alg = value;
           break;
-
         case 'created':
           if (!isInteger(value) || value < 0) return withFailure('INVALID', 'Invalid "created" parameter');
           parameters.created = value;
           break;
-
         case 'expires':
           if (!isInteger(value) || value < 0) return withFailure('INVALID', 'Invalid "expires" parameter');
           parameters.expires = value;
           break;
-
         case 'keyid':
           if (!isString(value)) return withFailure('INVALID', 'Invalid "keyid" parameter');
           parameters.keyid = value;
           break;
-
         case 'nonce':
           if (!isString(value)) return withFailure('INVALID', 'Invalid "nonce" parameter');
           parameters.nonce = value;
           break;
-
         default:
-          return withFailure(
-            'INVALID',
-            `Invalid "signature-input" header field value (unknown parameter ${encodeBareItem(key)})`
-          );
+          return withFailure('INVALID', `Invalid "signature-input" header field value (unknown parameter ${encodeBareItem(key)})`);
       }
     }
 
@@ -316,7 +300,7 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
   const signingData = inputLines.join('\n');
 
   // ==========================
-  // DEBUG PRINT (signing data)
+  // DEBUG PRINT
   // ==========================
   console.log('===== SIGNATURE DEBUG =====');
   console.log('keyid:', parameters.keyid);
@@ -336,64 +320,99 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
     return withFailure('UNSUPPORTED', `Signature algorithm ${encodeBareItem(alg)} is not supported`);
   }
 
-  // ==========================================
-  // BRUTE FORCE DEBUG (find exact match)
-  // ==========================================
   const receivedB64 = Buffer.from(signature).toString('base64');
 
-  const keyCandidates: Array<{ label: string; key: Uint8Array }> = [
-    { label: 'key:as-is', key: resolverResult.key },
-    {
-      label: 'key:utf8-from-as-is',
-      key: Buffer.from(Buffer.from(resolverResult.key).toString('utf8'), 'utf8'),
-    },
-  ];
+  // ==========================================
+  // KEY / AUTHORITY brute candidates
+  // ==========================================
+  const secretBytes = Buffer.from(resolverResult.key);
 
-  const reqTargetLineIndex = signingData.split('\n').findIndex((l) => l.startsWith('"@request-target": '));
-  if (reqTargetLineIndex === -1) {
-    return withFailure('INVALID', 'Missing "@request-target" line in signing data');
-  }
+  // IMPORTANT:
+  // resolverResult.key might already be decoded bytes OR might be raw text bytes depending on your SecretService.
+  // We'll try multiple interpretations anyway.
+  const keyCandidates: Array<{ label: string; key: Uint8Array }> = [
+    { label: 'key:as-is', key: secretBytes },
+
+    // treat as utf8 text
+    { label: 'key:utf8(text)->bytes', key: Buffer.from(secretBytes.toString('utf8'), 'utf8') },
+
+    // treat as base64 string (NO decode in SecretService case)
+    { label: 'key:as-base64-string-bytes', key: Buffer.from(secretBytes.toString('utf8'), 'utf8') },
+
+    // try decoding that utf8 as base64
+    {
+      label: 'key:decode-base64(utf8)',
+      key: (() => {
+        try {
+          return Buffer.from(secretBytes.toString('utf8'), 'base64');
+        } catch {
+          return Buffer.alloc(0);
+        }
+      })(),
+    },
+
+    // try decoding base64url -> base64 -> bytes
+    {
+      label: 'key:decode-base64url(utf8)',
+      key: (() => {
+        try {
+          return Buffer.from(b64UrlToStd(secretBytes.toString('utf8')), 'base64');
+        } catch {
+          return Buffer.alloc(0);
+        }
+      })(),
+    },
+  ].filter((k) => k.key.length > 0);
 
   const lines = signingData.split('\n');
-  const currentReqTargetLine = lines[reqTargetLineIndex];
-  const currentReqTargetValue = currentReqTargetLine.replace('"@request-target": ', '');
 
-  const reqTargetCandidates = [
-    currentReqTargetValue,
-    `get ${currentReqTargetValue}`,
-    `GET ${currentReqTargetValue}`,
-  ].filter(Boolean);
+  const rtIndex = lines.findIndex((l) => l.startsWith('"@request-target": '));
+  const authIndex = lines.findIndex((l) => l.startsWith('"@authority": '));
+
+  const rtValue = rtIndex >= 0 ? lines[rtIndex].replace('"@request-target": ', '') : null;
+  const authValue = authIndex >= 0 ? lines[authIndex].replace('"@authority": ', '') : null;
+
+  const requestTargetCandidates = rtValue
+    ? [rtValue, `get ${rtValue}`, `GET ${rtValue}`]
+    : [];
+
+  const authorityCandidates = authValue
+    ? [authValue, `${authValue}:443`]
+    : [];
 
   console.log('===== BRUTE DEBUG =====');
   console.log('received (base64):', receivedB64);
-  console.log('request-target candidates:', reqTargetCandidates);
+  console.log('request-target candidates:', requestTargetCandidates);
+  console.log('authority candidates:', authorityCandidates);
   console.log('key candidates:', keyCandidates.map((k) => k.label));
   console.log('=======================');
 
-  for (const rt of reqTargetCandidates) {
-    const variantLines = [...lines];
-    variantLines[reqTargetLineIndex] = `"@request-target": ${rt}`;
-    const variantSigningData = variantLines.join('\n');
+  for (const rt of requestTargetCandidates) {
+    for (const au of authorityCandidates) {
+      const variantLines = [...lines];
+      if (rtIndex >= 0) variantLines[rtIndex] = `"@request-target": ${rt}`;
+      if (authIndex >= 0) variantLines[authIndex] = `"@authority": ${au}`;
+      const variantSigningData = variantLines.join('\n');
 
-    for (const kc of keyCandidates) {
-      const computed = createHmac('sha256', kc.key).update(variantSigningData).digest();
-      const computedB64 = Buffer.from(computed).toString('base64');
+      for (const kc of keyCandidates) {
+        const computed = createHmac('sha256', kc.key).update(variantSigningData).digest();
+        const computedB64 = Buffer.from(computed).toString('base64');
 
-      console.log(`[try] ${kc.label} | rt="${rt}" | computed=${computedB64}`);
+        console.log(`[try] ${kc.label} | rt="${rt}" | auth="${au}" | computed=${computedB64}`);
 
-      if (computedB64 === receivedB64) {
-        console.log('✅ MATCH FOUND:', { key: kc.label, requestTarget: rt });
-
-        return resolverResult.code === 'GOODKEY'
-          ? { code: 'VERIFIED' }
-          : withFailure('FAILED', 'Signatures do not match (BADKEY)');
+        if (computedB64 === receivedB64) {
+          console.log('✅ MATCH FOUND:', { key: kc.label, requestTarget: rt, authority: au });
+          return resolverResult.code === 'GOODKEY'
+            ? { code: 'VERIFIED' }
+            : withFailure('FAILED', 'Signatures do not match (BADKEY)');
+        }
       }
     }
   }
 
   console.log('❌ NO MATCH across candidates');
 
-  // fallback normal compare (just in case)
+  // fallback normal compare
   const computedSignature = createHmac('sha256', resolverResult.key).update(signingData).digest();
 
   console.log('RECEIVED signature (base64):', receivedB64);
