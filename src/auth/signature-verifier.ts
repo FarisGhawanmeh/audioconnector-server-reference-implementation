@@ -138,7 +138,6 @@ const querySignatureHeaderField = (headers: HeaderFields, name: string): Diction
 };
 
 function b64UrlToStd(b64: string): string {
-  // convert base64url -> base64
   return b64.replace(/-/g, '+').replace(/_/g, '/');
 }
 
@@ -173,6 +172,7 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
   if (signatureFields.size === 0) return withFailure('INVALID', 'Found "signature-input" but no "signature" header field');
 
   const signatures: SignatureInfo[] = [];
+
   for (const [label, signatureBase] of signatureInputFields) {
     const signatureItem = signatureFields.get(label);
 
@@ -322,50 +322,41 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
 
   const receivedB64 = Buffer.from(signature).toString('base64');
 
-  // ==========================================
-  // KEY / AUTHORITY brute candidates
-  // ==========================================
-  const secretBytes = Buffer.from(resolverResult.key);
+  // ==========================================================
+  // 🔥 NEW: get raw secret from ENV and try it as key too
+  // ==========================================================
+  const rawFromEnv =
+    process.env.GENESYS_CLIENT_SECRET ??
+    process.env.AUDIOHOOK_CLIENT_SECRET ??
+    process.env.CLIENT_SECRET ??
+    '';
 
-  // IMPORTANT:
-  // resolverResult.key might already be decoded bytes OR might be raw text bytes depending on your SecretService.
-  // We'll try multiple interpretations anyway.
+  console.log('===== SECRET ENV DEBUG =====');
+  console.log('rawFromEnv length:', rawFromEnv.length);
+  console.log('rawFromEnv preview:', rawFromEnv ? rawFromEnv.slice(0, 6) + '...' + rawFromEnv.slice(-6) : '(empty)');
+  console.log('============================');
+
   const keyCandidates: Array<{ label: string; key: Uint8Array }> = [
-    { label: 'key:as-is', key: secretBytes },
+    // from SecretService (whatever it returned)
+    { label: 'key:resolver(as-is)', key: Buffer.from(resolverResult.key) },
 
-    // treat as utf8 text
-    { label: 'key:utf8(text)->bytes', key: Buffer.from(secretBytes.toString('utf8'), 'utf8') },
+    // raw env as utf8 bytes (NO base64 decode)
+    ...(rawFromEnv
+      ? [{ label: 'key:env(raw utf8 bytes)', key: Buffer.from(rawFromEnv, 'utf8') }]
+      : []),
 
-    // treat as base64 string (NO decode in SecretService case)
-    { label: 'key:as-base64-string-bytes', key: Buffer.from(secretBytes.toString('utf8'), 'utf8') },
+    // env decoded base64 bytes
+    ...(rawFromEnv
+      ? [{ label: 'key:env(base64 decoded)', key: Buffer.from(rawFromEnv, 'base64') }]
+      : []),
 
-    // try decoding that utf8 as base64
-    {
-      label: 'key:decode-base64(utf8)',
-      key: (() => {
-        try {
-          return Buffer.from(secretBytes.toString('utf8'), 'base64');
-        } catch {
-          return Buffer.alloc(0);
-        }
-      })(),
-    },
-
-    // try decoding base64url -> base64 -> bytes
-    {
-      label: 'key:decode-base64url(utf8)',
-      key: (() => {
-        try {
-          return Buffer.from(b64UrlToStd(secretBytes.toString('utf8')), 'base64');
-        } catch {
-          return Buffer.alloc(0);
-        }
-      })(),
-    },
+    // env decoded base64url bytes
+    ...(rawFromEnv
+      ? [{ label: 'key:env(base64url decoded)', key: Buffer.from(b64UrlToStd(rawFromEnv), 'base64') }]
+      : []),
   ].filter((k) => k.key.length > 0);
 
   const lines = signingData.split('\n');
-
   const rtIndex = lines.findIndex((l) => l.startsWith('"@request-target": '));
   const authIndex = lines.findIndex((l) => l.startsWith('"@authority": '));
 
@@ -412,7 +403,7 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
 
   console.log('❌ NO MATCH across candidates');
 
-  // fallback normal compare
+  // fallback normal compare (not expected to match if brute didn't)
   const computedSignature = createHmac('sha256', resolverResult.key).update(signingData).digest();
 
   console.log('RECEIVED signature (base64):', receivedB64);
