@@ -4,16 +4,21 @@ import {
   verifySignature,
   withFailure,
   queryCanonicalizedHeaderField,
-  DerivedComponentTag,
   SignatureParameters,
 } from './signature-verifier';
 import { SecretService } from '../services/secret-service';
 
-export function verifyRequestSignature(request: Request, secretService: SecretService): Promise<VerifyResult> {
+export function verifyRequestSignature(
+  request: Request,
+  secretService: SecretService
+): Promise<VerifyResult> {
   return verifyRequestSignatureImpl(request, secretService);
 }
 
-async function verifyRequestSignatureImpl(request: Request, secretService: SecretService): Promise<VerifyResult> {
+async function verifyRequestSignatureImpl(
+  request: Request,
+  secretService: SecretService
+): Promise<VerifyResult> {
   const apiKey = queryCanonicalizedHeaderField(request.headers, 'x-api-key');
 
   if (!apiKey) {
@@ -22,48 +27,54 @@ async function verifyRequestSignatureImpl(request: Request, secretService: Secre
 
   const result = await verifySignature({
     headerFields: request.headers,
+
     requiredComponents: [
       '@request-target',
-      '@authority',
-      'audiohook-organization-id',
       'audiohook-session-id',
+      'audiohook-organization-id',
       'audiohook-correlation-id',
       'x-api-key',
+      '@authority',
     ],
+
     maxSignatureAge: 10,
 
-    derivedComponentLookup: (name: DerivedComponentTag) => {
+    derivedComponentLookup: (name) => {
       if (name === '@request-target') {
-        // IMPORTANT: Genesys غالباً تستخدم الـ path+query فقط.
-        // Express request.url includes path + query string (if any).
-        const url = request.url ?? '';
+        const url = request.url ?? null;
         console.log('[auth] derived @request-target =', url);
         return url;
       }
 
       if (name === '@authority') {
-        // Prefer host header exactly as received
-        const host = queryCanonicalizedHeaderField(request.headers, 'host');
-        if (host) {
-          console.log('[auth] derived @authority(host) =', host);
-          return host;
-        }
-        return null;
+        const host =
+          queryCanonicalizedHeaderField(request.headers, 'host') ?? null;
+        console.log('[auth] derived @authority(host) =', host);
+        return host;
       }
 
       return null;
     },
 
     keyResolver: async (parameters: SignatureParameters) => {
-      if (!parameters.nonce) return withFailure('PRECONDITION', 'Missing "nonce" signature parameter');
+      if (!parameters.nonce)
+        return withFailure('PRECONDITION', 'Missing "nonce" signature parameter');
       if (parameters.nonce.length < 22)
-        return withFailure('PRECONDITION', 'Provided "nonce" signature parameter is too small');
+        return withFailure(
+          'PRECONDITION',
+          'Provided "nonce" signature parameter is too small'
+        );
 
       const keyId = parameters.keyid;
-      if (!keyId) return withFailure('PRECONDITION', 'Missing "keyid" signature parameter');
+      if (!keyId)
+        return withFailure('PRECONDITION', 'Missing "keyid" signature parameter');
 
+      // Genesys sends x-api-key + keyid same value عادة
       if (keyId !== apiKey) {
-        return withFailure('PRECONDITION', 'X-API-KEY header field and signature keyid mismatch');
+        return withFailure(
+          'PRECONDITION',
+          'X-API-KEY header field and signature keyid mismatch'
+        );
       }
 
       const secret = secretService.getSecretForKey(keyId);
@@ -75,7 +86,9 @@ async function verifyRequestSignatureImpl(request: Request, secretService: Secre
     },
   });
 
-  // (اختياري) إذا بدك تعتبر unsigned مسموح:
+  console.log('VERIFY RESULT:', result);
+
+  // optional: allow unsigned for testing
   if (result.code === 'UNSIGNED') {
     return { code: 'VERIFIED' };
   }
