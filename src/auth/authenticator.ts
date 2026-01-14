@@ -32,15 +32,12 @@ async function verifyRequestSignatureImpl(request: Request, secretService: Secre
     maxSignatureAge: 10,
 
     // ✅ @request-target = "get /path"
-    derivedComponentLookup: (name: any) => {
-      if (name === '@request-target') {
-        const method = ((request as any).method ?? 'GET').toLowerCase();
-        const url = request.url ?? '';
-        return `${method} ${url}`; // مثال: "get /openai-voice-bot"
-      }
-      return null;
-    },
-
+ derivedComponentLookup: (name: any) => {
+  if (name === '@request-target') {
+    return request.url ?? null; // ✅ فقط /openai-voice-bot
+  }
+  return null;
+},
     keyResolver: async (parameters: SignatureParameters) => {
       if (!parameters.nonce) {
         return withFailure('PRECONDITION', 'Missing "nonce" signature parameter');
