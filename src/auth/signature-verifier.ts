@@ -94,7 +94,10 @@ export type VerifyResultSuccess = {
 
 export type VerifyResult = VerifyResultFailure | VerifyResultSuccess;
 
-export const withFailure = (code: VerifyResultFailureCode, reason?: string): VerifyResultFailure => ({
+export const withFailure = (
+  code: VerifyResultFailureCode,
+  reason?: string
+): VerifyResultFailure => ({
   code,
   reason,
 });
@@ -108,7 +111,9 @@ export type KeyResolverResult =
   | { code: 'BADKEY'; key: Uint8Array; alg?: string }
   | VerifyResultFailure;
 
-export type KeyResolver = (parameters: SignatureParameters) => Promise<KeyResolverResult> | KeyResolverResult;
+export type KeyResolver = (
+  parameters: SignatureParameters
+) => Promise<KeyResolverResult> | KeyResolverResult;
 
 export type VerifierOptions = {
   headerFields: HeaderFields;
@@ -123,7 +128,10 @@ export type VerifierOptions = {
 export const canonicalizeHeaderFieldValue = (value: string): string =>
   value.trim().replace(/[ \t]*\r\n[ \t]+/g, ' ');
 
-export const queryCanonicalizedHeaderField = (headers: HeaderFields, name: string): string | null => {
+export const queryCanonicalizedHeaderField = (
+  headers: HeaderFields,
+  name: string
+): string | null => {
   const field = headers[name];
   return field
     ? Array.isArray(field)
@@ -141,59 +149,10 @@ function b64UrlToStd(b64: string): string {
   return b64.replace(/-/g, '+').replace(/_/g, '/');
 }
 
-function stripSigLabel(rawSigInputHeader: string, label: string): string | null {
-  // rawSigInputHeader example:
-  // sig1=("<...>");created=...;...
-  // return substring after "sig1="
-  const needle = `${label}=`;
-  const idx = rawSigInputHeader.indexOf(needle);
-  if (idx < 0) return null;
-  return rawSigInputHeader.slice(idx + needle.length);
-}
-
-type SigningVariant = {
-  includeQuotesOnLeft: boolean; // '"header": value' vs 'header: value'
-  requestTarget: string;
-  authority: string;
-  sigParamsLineValue: string; // value for @signature-params (after colon+space)
-  eol: '\n' | '\r\n';
-  trailingEol: boolean;
-};
-
-function buildSigningData(baseLines: string[], variant: SigningVariant): string {
-  // baseLines are in canonical quoted-left format:
-  // "@request-target": ...
-  // "header": ...
-  // "@signature-params": ...
-  //
-  // We patch @request-target, @authority, and @signature-params then optionally remove quotes on left.
-
-  const lines = [...baseLines];
-
-  const rtIdx = lines.findIndex((l) => l.startsWith('"@request-target": '));
-  const auIdx = lines.findIndex((l) => l.startsWith('"@authority": '));
-  const spIdx = lines.findIndex((l) => l.startsWith('"@signature-params": '));
-
-  if (rtIdx >= 0) lines[rtIdx] = `"@request-target": ${variant.requestTarget}`;
-  if (auIdx >= 0) lines[auIdx] = `"@authority": ${variant.authority}`;
-  if (spIdx >= 0) lines[spIdx] = `"@signature-params": ${variant.sigParamsLineValue}`;
-
-  let finalLines = lines;
-
-  if (!variant.includeQuotesOnLeft) {
-    // Turn:
-    // "x-api-key": value
-    // into:
-    // x-api-key: value
-    finalLines = lines.map((l) => {
-      const m = l.match(/^"([^"]+)":\s(.*)$/);
-      if (!m) return l;
-      return `${m[1]}: ${m[2]}`;
-    });
-  }
-
-  const joined = finalLines.join(variant.eol);
-  return variant.trailingEol ? joined + variant.eol : joined;
+function makeSigningDataWithEol(signingData: string, eol: 'LF' | 'CRLF', trailing: boolean) {
+  const lines = signingData.split('\n');
+  const joined = eol === 'CRLF' ? lines.join('\r\n') : lines.join('\n');
+  return trailing ? joined + (eol === 'CRLF' ? '\r\n' : '\n') : joined;
 }
 
 export const verifySignature = async (options: VerifierOptions): Promise<VerifyResult> => {
@@ -221,22 +180,31 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
   }
 
   if (signatureInputFields.size === 0) {
-    if (signatureFields.size === 0) return withFailure('UNSIGNED', 'No "signature" and "signature-input" header fields');
+    if (signatureFields.size === 0)
+      return withFailure('UNSIGNED', 'No "signature" and "signature-input" header fields');
     return withFailure('INVALID', 'Found "signature" but no "signature-input" header field');
   }
-  if (signatureFields.size === 0) return withFailure('INVALID', 'Found "signature-input" but no "signature" header field');
+  if (signatureFields.size === 0)
+    return withFailure('INVALID', 'Found "signature-input" but no "signature" header field');
 
   const signatures: SignatureInfo[] = [];
 
   for (const [label, signatureBase] of signatureInputFields) {
     const signatureItem = signatureFields.get(label);
 
-    if (!signatureItem) return withFailure('INVALID', `Signature with label ${encodeBareItem(label)} not found`);
+    if (!signatureItem)
+      return withFailure('INVALID', `Signature with label ${encodeBareItem(label)} not found`);
     if (!isItem(signatureItem) || !isByteSequence(signatureItem.value)) {
-      return withFailure('INVALID', `Invalid "signature" header field value (label: ${encodeBareItem(label)})`);
+      return withFailure(
+        'INVALID',
+        `Invalid "signature" header field value (label: ${encodeBareItem(label)})`
+      );
     }
     if (!isInnerList(signatureBase)) {
-      return withFailure('INVALID', `Invalid "signature-input" header field value for label ${encodeBareItem(label)}`);
+      return withFailure(
+        'INVALID',
+        `Invalid "signature-input" header field value for label ${encodeBareItem(label)}`
+      );
     }
 
     const components: SignatureComponent[] = [];
@@ -255,7 +223,8 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
       }
     }
 
-    if (!signatureBase.params) return withFailure('INVALID', 'Invalid "signature-input" header field value (no parameters)');
+    if (!signatureBase.params)
+      return withFailure('INVALID', 'Invalid "signature-input" header field value (no parameters)');
 
     const parameters: SignatureParameters = {};
     for (const { key, value } of signatureBase.params) {
@@ -281,10 +250,7 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
           parameters.nonce = value;
           break;
         default:
-          return withFailure(
-            'INVALID',
-            `Invalid "signature-input" header field value (unknown parameter ${encodeBareItem(key)})`
-          );
+          return withFailure('INVALID', `Invalid "signature-input" header field value (unknown parameter ${encodeBareItem(key)})`);
       }
     }
 
@@ -319,7 +285,7 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
     }
   }
 
-  // Build canonical base signing string (quoted-left)
+  // Build signing string
   const remaining = new Set(requiredComponents);
   const seen = new Set<string>();
   const inputLines: string[] = [];
@@ -354,22 +320,16 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
     );
   }
 
-  // canonical @signature-params
-  const canonicalSigParams = encodeInnerList(signatureBase);
-  inputLines.push(`"@signature-params": ${canonicalSigParams}`);
+  inputLines.push(`"@signature-params": ${encodeInnerList(signatureBase)}`);
+  const signingData = inputLines.join('\n');
 
-  const canonicalSigningData = inputLines.join('\n');
-
-  // ==========================
-  // DEBUG PRINT (canonical)
-  // ==========================
   console.log('===== SIGNATURE DEBUG =====');
   console.log('keyid:', parameters.keyid);
   console.log('alg:', parameters.alg);
   console.log('created:', parameters.created);
   console.log('expires:', parameters.expires);
   console.log('----- SIGNING DATA START -----');
-  console.log(canonicalSigningData);
+  console.log(signingData);
   console.log('----- SIGNING DATA END -----');
   console.log('=============================');
 
@@ -383,87 +343,47 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
 
   const receivedB64 = Buffer.from(signature).toString('base64');
 
-  // Try raw ENV too (as you already do)
+  // Try extra keys from env directly
   const rawFromEnv =
     process.env.GENESYS_CLIENT_SECRET ??
+    process.env.GENESYS_AUDIO_CONNECTOR_SECRET ??
     process.env.AUDIOHOOK_CLIENT_SECRET ??
     process.env.CLIENT_SECRET ??
-    process.env.GENESYS_AUDIO_CONNECTOR_SECRET ??
     '';
 
   console.log('===== SECRET ENV DEBUG =====');
   console.log('rawFromEnv length:', rawFromEnv.length);
-  console.log('rawFromEnv preview:', rawFromEnv ? rawFromEnv.slice(0, 6) + '...' + rawFromEnv.slice(-6) : '(empty)');
+  console.log(
+    'rawFromEnv preview:',
+    rawFromEnv ? rawFromEnv.slice(0, 6) + '...' + rawFromEnv.slice(-6) : '(empty)'
+  );
   console.log('============================');
-
-  const rawTrim = rawFromEnv.trim();
 
   const keyCandidates: Array<{ label: string; key: Uint8Array }> = [
     { label: 'key:resolver(as-is)', key: Buffer.from(resolverResult.key) },
 
     ...(rawFromEnv ? [{ label: 'key:env(raw utf8 bytes)', key: Buffer.from(rawFromEnv, 'utf8') }] : []),
-    ...(rawTrim && rawTrim !== rawFromEnv
-      ? [{ label: 'key:env(raw utf8 bytes, trimmed)', key: Buffer.from(rawTrim, 'utf8') }]
-      : []),
-
     ...(rawFromEnv ? [{ label: 'key:env(base64 decoded)', key: Buffer.from(rawFromEnv, 'base64') }] : []),
-    ...(rawTrim && rawTrim !== rawFromEnv
-      ? [{ label: 'key:env(base64 decoded, trimmed)', key: Buffer.from(rawTrim, 'base64') }]
-      : []),
-
     ...(rawFromEnv
       ? [{ label: 'key:env(base64url decoded)', key: Buffer.from(b64UrlToStd(rawFromEnv), 'base64') }]
       : []),
-    ...(rawTrim && rawTrim !== rawFromEnv
-      ? [{ label: 'key:env(base64url decoded, trimmed)', key: Buffer.from(b64UrlToStd(rawTrim), 'base64') }]
-      : []),
   ].filter((k) => k.key.length > 0);
 
-  // Extract candidates for request-target / authority from canonical lines
-  const baseLines = canonicalSigningData.split('\n');
+  const lines = signingData.split('\n');
+  const rtIndex = lines.findIndex((l) => l.startsWith('"@request-target": '));
+  const authIndex = lines.findIndex((l) => l.startsWith('"@authority": '));
 
-  const rtLine = baseLines.find((l) => l.startsWith('"@request-target": ')) ?? '';
-  const auLine = baseLines.find((l) => l.startsWith('"@authority": ')) ?? '';
-  const rtValue = rtLine.replace('"@request-target": ', '');
-  const auValue = auLine.replace('"@authority": ', '');
+  const rtValue = rtIndex >= 0 ? lines[rtIndex].replace('"@request-target": ', '') : null;
+  const authValue = authIndex >= 0 ? lines[authIndex].replace('"@authority": ', '') : null;
 
-  const requestTargetCandidates = rtValue
-    ? [rtValue, `get ${rtValue}`, `GET ${rtValue}`]
-    : [];
+  const requestTargetCandidates = rtValue ? [rtValue, `get ${rtValue}`, `GET ${rtValue}`] : [];
+  const authorityCandidates = authValue ? [authValue, `${authValue}:443`] : [];
 
-  const authorityCandidates = auValue
-    ? [auValue, `${auValue}:443`]
-    : [];
-
-  const eolCandidates: Array<{ label: string; eol: '\n' | '\r\n'; trailing: boolean }> = [
-    { label: 'LF no-trailing', eol: '\n', trailing: false },
-    { label: 'LF trailing', eol: '\n', trailing: true },
-    { label: 'CRLF no-trailing', eol: '\r\n', trailing: false },
-    { label: 'CRLF trailing', eol: '\r\n', trailing: true },
-  ];
-
-  // NEW: signature-params candidates (canonical vs raw from header)
-  const sigInputHeaderRaw = typeof headerFields['signature-input'] === 'string'
-    ? headerFields['signature-input']
-    : Array.isArray(headerFields['signature-input'])
-      ? headerFields['signature-input'][0]
-      : undefined;
-
-  const rawSigParams = sigInputHeaderRaw ? stripSigLabel(sigInputHeaderRaw, chosen.label) : null;
-
-  const sigParamsCandidates: Array<{ label: string; value: string }> = [
-    { label: 'sigparams:canonical', value: canonicalSigParams },
-    ...(rawSigParams ? [{ label: 'sigparams:raw-from-header', value: rawSigParams }] : []),
-
-    // some implementations might add a space after semicolons (rare, but quick to try)
-    { label: 'sigparams:canonical(; space)', value: canonicalSigParams.replace(/;/g, '; ') },
-    ...(rawSigParams ? [{ label: 'sigparams:raw(; space)', value: rawSigParams.replace(/;/g, '; ') }] : []),
-  ];
-
-  // NEW: quote-left variants
-  const quoteLeftCandidates: Array<{ label: string; includeQuotesOnLeft: boolean }> = [
-    { label: 'left:quoted', includeQuotesOnLeft: true },
-    { label: 'left:unquoted', includeQuotesOnLeft: false },
+  const eolCandidates: Array<{ label: string; eol: 'LF' | 'CRLF'; trailing: boolean }> = [
+    { label: 'LF no-trailing', eol: 'LF', trailing: false },
+    { label: 'LF trailing', eol: 'LF', trailing: true },
+    { label: 'CRLF no-trailing', eol: 'CRLF', trailing: false },
+    { label: 'CRLF trailing', eol: 'CRLF', trailing: true },
   ];
 
   console.log('===== BRUTE DEBUG =====');
@@ -471,50 +391,32 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
   console.log('request-target candidates:', requestTargetCandidates);
   console.log('authority candidates:', authorityCandidates);
   console.log('eol candidates:', eolCandidates.map((x) => x.label));
-  console.log('sigparams candidates:', sigParamsCandidates.map((x) => x.label));
-  console.log('left candidates:', quoteLeftCandidates.map((x) => x.label));
   console.log('key candidates:', keyCandidates.map((k) => k.label));
   console.log('=======================');
 
   for (const rt of requestTargetCandidates) {
     for (const au of authorityCandidates) {
-      for (const sp of sigParamsCandidates) {
-        for (const ql of quoteLeftCandidates) {
-          for (const eol of eolCandidates) {
-            const variant: SigningVariant = {
-              includeQuotesOnLeft: ql.includeQuotesOnLeft,
-              requestTarget: rt,
-              authority: au,
-              sigParamsLineValue: sp.value,
-              eol: eol.eol,
-              trailingEol: eol.trailing,
-            };
+      const variantLines = [...lines];
+      if (rtIndex >= 0) variantLines[rtIndex] = `"@request-target": ${rt}`;
+      if (authIndex >= 0) variantLines[authIndex] = `"@authority": ${au}`;
+      const variantSigningData = variantLines.join('\n');
 
-            const variantSigningData = buildSigningData(baseLines, variant);
+      for (const eol of eolCandidates) {
+        const dataWithEol = makeSigningDataWithEol(variantSigningData, eol.eol, eol.trailing);
 
-            for (const kc of keyCandidates) {
-              const computed = createHmac('sha256', kc.key).update(variantSigningData).digest();
-              const computedB64 = Buffer.from(computed).toString('base64');
+        for (const kc of keyCandidates) {
+          const computed = createHmac('sha256', kc.key).update(dataWithEol).digest();
+          const computedB64 = Buffer.from(computed).toString('base64');
 
-              console.log(
-                `[try] ${kc.label} | ${eol.label} | ${sp.label} | ${ql.label} | rt="${rt}" | auth="${au}" | computed=${computedB64}`
-              );
+          console.log(`[try] ${kc.label} | ${eol.label} | rt="${rt}" | auth="${au}" | computed=${computedB64}`);
 
-              if (computedB64 === receivedB64) {
-                console.log('✅ MATCH FOUND:', {
-                  key: kc.label,
-                  eol: eol.label,
-                  sigparams: sp.label,
-                  left: ql.label,
-                  requestTarget: rt,
-                  authority: au,
-                });
+          if (computedB64 === receivedB64) {
+            console.log('✅ MATCH FOUND:', { key: kc.label, requestTarget: rt, authority: au, eol: eol.label });
 
-                return resolverResult.code === 'GOODKEY'
-                  ? { code: 'VERIFIED' }
-                  : withFailure('FAILED', 'Signatures do not match (BADKEY)');
-              }
-            }
+            // verified!
+            return resolverResult.code === 'GOODKEY'
+              ? { code: 'VERIFIED' }
+              : withFailure('FAILED', 'Signatures do not match (BADKEY)');
           }
         }
       }
@@ -523,14 +425,16 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
 
   console.log('❌ NO MATCH across candidates');
 
-  // fallback normal compare (canonical)
-  const computedSignature = createHmac('sha256', resolverResult.key).update(canonicalSigningData).digest();
+  // fallback normal compare
+  const computedSignature = createHmac('sha256', resolverResult.key).update(signingData).digest();
 
   console.log('RECEIVED signature (base64):', receivedB64);
   console.log('COMPUTED signature (base64):', Buffer.from(computedSignature).toString('base64'));
 
   if (timingSafeEqual(signature, computedSignature)) {
-    return resolverResult.code === 'GOODKEY' ? { code: 'VERIFIED' } : withFailure('FAILED', 'Signatures do not match');
+    return resolverResult.code === 'GOODKEY'
+      ? { code: 'VERIFIED' }
+      : withFailure('FAILED', 'Signatures do not match');
   }
 
   return withFailure('FAILED', 'Signatures do not match');
