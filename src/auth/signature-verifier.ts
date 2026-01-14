@@ -141,9 +141,59 @@ function b64UrlToStd(b64: string): string {
   return b64.replace(/-/g, '+').replace(/_/g, '/');
 }
 
-function buildSigningData(lines: string[], eol: '\n' | '\r\n', trailingNewline: boolean): string {
-  const s = lines.join(eol);
-  return trailingNewline ? s + eol : s;
+function stripSigLabel(rawSigInputHeader: string, label: string): string | null {
+  // rawSigInputHeader example:
+  // sig1=("<...>");created=...;...
+  // return substring after "sig1="
+  const needle = `${label}=`;
+  const idx = rawSigInputHeader.indexOf(needle);
+  if (idx < 0) return null;
+  return rawSigInputHeader.slice(idx + needle.length);
+}
+
+type SigningVariant = {
+  includeQuotesOnLeft: boolean; // '"header": value' vs 'header: value'
+  requestTarget: string;
+  authority: string;
+  sigParamsLineValue: string; // value for @signature-params (after colon+space)
+  eol: '\n' | '\r\n';
+  trailingEol: boolean;
+};
+
+function buildSigningData(baseLines: string[], variant: SigningVariant): string {
+  // baseLines are in canonical quoted-left format:
+  // "@request-target": ...
+  // "header": ...
+  // "@signature-params": ...
+  //
+  // We patch @request-target, @authority, and @signature-params then optionally remove quotes on left.
+
+  const lines = [...baseLines];
+
+  const rtIdx = lines.findIndex((l) => l.startsWith('"@request-target": '));
+  const auIdx = lines.findIndex((l) => l.startsWith('"@authority": '));
+  const spIdx = lines.findIndex((l) => l.startsWith('"@signature-params": '));
+
+  if (rtIdx >= 0) lines[rtIdx] = `"@request-target": ${variant.requestTarget}`;
+  if (auIdx >= 0) lines[auIdx] = `"@authority": ${variant.authority}`;
+  if (spIdx >= 0) lines[spIdx] = `"@signature-params": ${variant.sigParamsLineValue}`;
+
+  let finalLines = lines;
+
+  if (!variant.includeQuotesOnLeft) {
+    // Turn:
+    // "x-api-key": value
+    // into:
+    // x-api-key: value
+    finalLines = lines.map((l) => {
+      const m = l.match(/^"([^"]+)":\s(.*)$/);
+      if (!m) return l;
+      return `${m[1]}: ${m[2]}`;
+    });
+  }
+
+  const joined = finalLines.join(variant.eol);
+  return variant.trailingEol ? joined + variant.eol : joined;
 }
 
 export const verifySignature = async (options: VerifierOptions): Promise<VerifyResult> => {
@@ -269,7 +319,7 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
     }
   }
 
-  // Build signing string lines (we will vary EOL later)
+  // Build canonical base signing string (quoted-left)
   const remaining = new Set(requiredComponents);
   const seen = new Set<string>();
   const inputLines: string[] = [];
@@ -304,19 +354,22 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
     );
   }
 
-  inputLines.push(`"@signature-params": ${encodeInnerList(signatureBase)}`);
+  // canonical @signature-params
+  const canonicalSigParams = encodeInnerList(signatureBase);
+  inputLines.push(`"@signature-params": ${canonicalSigParams}`);
+
+  const canonicalSigningData = inputLines.join('\n');
 
   // ==========================
-  // DEBUG PRINT (base variant)
+  // DEBUG PRINT (canonical)
   // ==========================
-  const signingDataBase = buildSigningData(inputLines, '\n', false);
   console.log('===== SIGNATURE DEBUG =====');
   console.log('keyid:', parameters.keyid);
   console.log('alg:', parameters.alg);
   console.log('created:', parameters.created);
   console.log('expires:', parameters.expires);
   console.log('----- SIGNING DATA START -----');
-  console.log(signingDataBase);
+  console.log(canonicalSigningData);
   console.log('----- SIGNING DATA END -----');
   console.log('=============================');
 
@@ -330,13 +383,12 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
 
   const receivedB64 = Buffer.from(signature).toString('base64');
 
-  // ==========================================================
-  // Key candidates (SecretService + raw env)
-  // ==========================================================
+  // Try raw ENV too (as you already do)
   const rawFromEnv =
-    process.env.GENESYS_AUDIO_CONNECTOR_SECRET ??
+    process.env.GENESYS_CLIENT_SECRET ??
     process.env.AUDIOHOOK_CLIENT_SECRET ??
     process.env.CLIENT_SECRET ??
+    process.env.GENESYS_AUDIO_CONNECTOR_SECRET ??
     '';
 
   console.log('===== SECRET ENV DEBUG =====');
@@ -344,27 +396,45 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
   console.log('rawFromEnv preview:', rawFromEnv ? rawFromEnv.slice(0, 6) + '...' + rawFromEnv.slice(-6) : '(empty)');
   console.log('============================');
 
+  const rawTrim = rawFromEnv.trim();
+
   const keyCandidates: Array<{ label: string; key: Uint8Array }> = [
     { label: 'key:resolver(as-is)', key: Buffer.from(resolverResult.key) },
 
     ...(rawFromEnv ? [{ label: 'key:env(raw utf8 bytes)', key: Buffer.from(rawFromEnv, 'utf8') }] : []),
+    ...(rawTrim && rawTrim !== rawFromEnv
+      ? [{ label: 'key:env(raw utf8 bytes, trimmed)', key: Buffer.from(rawTrim, 'utf8') }]
+      : []),
+
     ...(rawFromEnv ? [{ label: 'key:env(base64 decoded)', key: Buffer.from(rawFromEnv, 'base64') }] : []),
+    ...(rawTrim && rawTrim !== rawFromEnv
+      ? [{ label: 'key:env(base64 decoded, trimmed)', key: Buffer.from(rawTrim, 'base64') }]
+      : []),
+
     ...(rawFromEnv
       ? [{ label: 'key:env(base64url decoded)', key: Buffer.from(b64UrlToStd(rawFromEnv), 'base64') }]
       : []),
+    ...(rawTrim && rawTrim !== rawFromEnv
+      ? [{ label: 'key:env(base64url decoded, trimmed)', key: Buffer.from(b64UrlToStd(rawTrim), 'base64') }]
+      : []),
   ].filter((k) => k.key.length > 0);
 
-  // Extract rt/auth from *lines* (so we can replace them in variants)
-  const rtIndex = inputLines.findIndex((l) => l.startsWith('"@request-target": '));
-  const authIndex = inputLines.findIndex((l) => l.startsWith('"@authority": '));
+  // Extract candidates for request-target / authority from canonical lines
+  const baseLines = canonicalSigningData.split('\n');
 
-  const rtValue = rtIndex >= 0 ? inputLines[rtIndex].replace('"@request-target": ', '') : null;
-  const authValue = authIndex >= 0 ? inputLines[authIndex].replace('"@authority": ', '') : null;
+  const rtLine = baseLines.find((l) => l.startsWith('"@request-target": ')) ?? '';
+  const auLine = baseLines.find((l) => l.startsWith('"@authority": ')) ?? '';
+  const rtValue = rtLine.replace('"@request-target": ', '');
+  const auValue = auLine.replace('"@authority": ', '');
 
-  const requestTargetCandidates = rtValue ? [rtValue, `get ${rtValue}`, `GET ${rtValue}`] : [];
-  const authorityCandidates = authValue ? [authValue, `${authValue}:443`] : [];
+  const requestTargetCandidates = rtValue
+    ? [rtValue, `get ${rtValue}`, `GET ${rtValue}`]
+    : [];
 
-  // NEW: EOL & trailing newline variants
+  const authorityCandidates = auValue
+    ? [auValue, `${auValue}:443`]
+    : [];
+
   const eolCandidates: Array<{ label: string; eol: '\n' | '\r\n'; trailing: boolean }> = [
     { label: 'LF no-trailing', eol: '\n', trailing: false },
     { label: 'LF trailing', eol: '\n', trailing: true },
@@ -372,41 +442,79 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
     { label: 'CRLF trailing', eol: '\r\n', trailing: true },
   ];
 
+  // NEW: signature-params candidates (canonical vs raw from header)
+  const sigInputHeaderRaw = typeof headerFields['signature-input'] === 'string'
+    ? headerFields['signature-input']
+    : Array.isArray(headerFields['signature-input'])
+      ? headerFields['signature-input'][0]
+      : undefined;
+
+  const rawSigParams = sigInputHeaderRaw ? stripSigLabel(sigInputHeaderRaw, chosen.label) : null;
+
+  const sigParamsCandidates: Array<{ label: string; value: string }> = [
+    { label: 'sigparams:canonical', value: canonicalSigParams },
+    ...(rawSigParams ? [{ label: 'sigparams:raw-from-header', value: rawSigParams }] : []),
+
+    // some implementations might add a space after semicolons (rare, but quick to try)
+    { label: 'sigparams:canonical(; space)', value: canonicalSigParams.replace(/;/g, '; ') },
+    ...(rawSigParams ? [{ label: 'sigparams:raw(; space)', value: rawSigParams.replace(/;/g, '; ') }] : []),
+  ];
+
+  // NEW: quote-left variants
+  const quoteLeftCandidates: Array<{ label: string; includeQuotesOnLeft: boolean }> = [
+    { label: 'left:quoted', includeQuotesOnLeft: true },
+    { label: 'left:unquoted', includeQuotesOnLeft: false },
+  ];
+
   console.log('===== BRUTE DEBUG =====');
   console.log('received (base64):', receivedB64);
   console.log('request-target candidates:', requestTargetCandidates);
   console.log('authority candidates:', authorityCandidates);
   console.log('eol candidates:', eolCandidates.map((x) => x.label));
+  console.log('sigparams candidates:', sigParamsCandidates.map((x) => x.label));
+  console.log('left candidates:', quoteLeftCandidates.map((x) => x.label));
   console.log('key candidates:', keyCandidates.map((k) => k.label));
   console.log('=======================');
 
   for (const rt of requestTargetCandidates) {
     for (const au of authorityCandidates) {
-      // Make a per-rt/au variant lines
-      const variantLines = [...inputLines];
-      if (rtIndex >= 0) variantLines[rtIndex] = `"@request-target": ${rt}`;
-      if (authIndex >= 0) variantLines[authIndex] = `"@authority": ${au}`;
-
-      for (const eolV of eolCandidates) {
-        const variantSigningData = buildSigningData(variantLines, eolV.eol, eolV.trailing);
-
-        for (const kc of keyCandidates) {
-          const computed = createHmac('sha256', kc.key).update(variantSigningData).digest();
-          const computedB64 = Buffer.from(computed).toString('base64');
-
-          console.log(`[try] ${kc.label} | ${eolV.label} | rt="${rt}" | auth="${au}" | computed=${computedB64}`);
-
-          if (computedB64 === receivedB64) {
-            console.log('✅ MATCH FOUND:', {
-              key: kc.label,
-              eol: eolV.label,
+      for (const sp of sigParamsCandidates) {
+        for (const ql of quoteLeftCandidates) {
+          for (const eol of eolCandidates) {
+            const variant: SigningVariant = {
+              includeQuotesOnLeft: ql.includeQuotesOnLeft,
               requestTarget: rt,
               authority: au,
-            });
+              sigParamsLineValue: sp.value,
+              eol: eol.eol,
+              trailingEol: eol.trailing,
+            };
 
-            return resolverResult.code === 'GOODKEY'
-              ? { code: 'VERIFIED' }
-              : withFailure('FAILED', 'Signatures do not match (BADKEY)');
+            const variantSigningData = buildSigningData(baseLines, variant);
+
+            for (const kc of keyCandidates) {
+              const computed = createHmac('sha256', kc.key).update(variantSigningData).digest();
+              const computedB64 = Buffer.from(computed).toString('base64');
+
+              console.log(
+                `[try] ${kc.label} | ${eol.label} | ${sp.label} | ${ql.label} | rt="${rt}" | auth="${au}" | computed=${computedB64}`
+              );
+
+              if (computedB64 === receivedB64) {
+                console.log('✅ MATCH FOUND:', {
+                  key: kc.label,
+                  eol: eol.label,
+                  sigparams: sp.label,
+                  left: ql.label,
+                  requestTarget: rt,
+                  authority: au,
+                });
+
+                return resolverResult.code === 'GOODKEY'
+                  ? { code: 'VERIFIED' }
+                  : withFailure('FAILED', 'Signatures do not match (BADKEY)');
+              }
+            }
           }
         }
       }
@@ -415,13 +523,13 @@ export const verifySignature = async (options: VerifierOptions): Promise<VerifyR
 
   console.log('❌ NO MATCH across candidates');
 
-  // Fallback (original LF no trailing)
-  const computedSignature = createHmac('sha256', resolverResult.key).update(signingDataBase).digest();
+  // fallback normal compare (canonical)
+  const computedSignature = createHmac('sha256', resolverResult.key).update(canonicalSigningData).digest();
 
   console.log('RECEIVED signature (base64):', receivedB64);
   console.log('COMPUTED signature (base64):', Buffer.from(computedSignature).toString('base64'));
 
-  if (signature.length === computedSignature.length && timingSafeEqual(signature, computedSignature)) {
+  if (timingSafeEqual(signature, computedSignature)) {
     return resolverResult.code === 'GOODKEY' ? { code: 'VERIFIED' } : withFailure('FAILED', 'Signatures do not match');
   }
 
