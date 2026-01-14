@@ -282,7 +282,7 @@ export const parse = (input: string | string[], type: FieldType): Item | List | 
 };
 
 const prepareParserInput = (input: string | string[]): string => (
-    discardOsp(Array.isArray(input) ? input.join(',') : input)
+    discardOsp(Array.isArray(input) ? input.join(', ') : input)
 );
 
 export const parseListField = (input: string | string[]): List => {
