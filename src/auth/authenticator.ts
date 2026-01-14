@@ -4,21 +4,16 @@ import {
   verifySignature,
   withFailure,
   queryCanonicalizedHeaderField,
+  DerivedComponentTag,
   SignatureParameters,
 } from './signature-verifier';
 import { SecretService } from '../services/secret-service';
 
-export function verifyRequestSignature(
-  request: Request,
-  secretService: SecretService
-): Promise<VerifyResult> {
+export function verifyRequestSignature(request: Request, secretService: SecretService): Promise<VerifyResult> {
   return verifyRequestSignatureImpl(request, secretService);
 }
 
-async function verifyRequestSignatureImpl(
-  request: Request,
-  secretService: SecretService
-): Promise<VerifyResult> {
+async function verifyRequestSignatureImpl(request: Request, secretService: SecretService): Promise<VerifyResult> {
   const apiKey = queryCanonicalizedHeaderField(request.headers, 'x-api-key');
 
   if (!apiKey) {
@@ -27,30 +22,42 @@ async function verifyRequestSignatureImpl(
 
   const result = await verifySignature({
     headerFields: request.headers,
-
     requiredComponents: [
       '@request-target',
-      'audiohook-session-id',
+      '@authority',
       'audiohook-organization-id',
+      'audiohook-session-id',
       'audiohook-correlation-id',
       'x-api-key',
-      '@authority',
     ],
-
     maxSignatureAge: 10,
 
-    // IMPORTANT: don't hardcode here. We'll let signature-verifier try both formats.
-    derivedComponentLookup: (name) => {
+    derivedComponentLookup: (name: DerivedComponentTag) => {
       if (name === '@request-target') {
-        // return path only by default; verifier will also try "get <path>"
-        return request.url ?? null;
+        // IMPORTANT: Genesys غالباً تستخدم الـ path+query فقط.
+        // Express request.url includes path + query string (if any).
+        const url = request.url ?? '';
+        console.log('[auth] derived @request-target =', url);
+        return url;
       }
+
+      if (name === '@authority') {
+        // Prefer host header exactly as received
+        const host = queryCanonicalizedHeaderField(request.headers, 'host');
+        if (host) {
+          console.log('[auth] derived @authority(host) =', host);
+          return host;
+        }
+        return null;
+      }
+
       return null;
     },
 
     keyResolver: async (parameters: SignatureParameters) => {
       if (!parameters.nonce) return withFailure('PRECONDITION', 'Missing "nonce" signature parameter');
-      if (parameters.nonce.length < 22) return withFailure('PRECONDITION', 'Provided "nonce" signature parameter is too small');
+      if (parameters.nonce.length < 22)
+        return withFailure('PRECONDITION', 'Provided "nonce" signature parameter is too small');
 
       const keyId = parameters.keyid;
       if (!keyId) return withFailure('PRECONDITION', 'Missing "keyid" signature parameter');
@@ -68,8 +75,7 @@ async function verifyRequestSignatureImpl(
     },
   });
 
-  console.log('VERIFY RESULT:', result);
-
+  // (اختياري) إذا بدك تعتبر unsigned مسموح:
   if (result.code === 'UNSIGNED') {
     return { code: 'VERIFIED' };
   }
