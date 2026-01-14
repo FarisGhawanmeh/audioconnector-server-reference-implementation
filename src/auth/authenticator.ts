@@ -31,20 +31,28 @@ async function verifyRequestSignatureImpl(request: Request, secretService: Secre
     ],
     maxSignatureAge: 10,
 
-    // IMPORTANT: Genesys expects @request-target to be the path (no method)
+    // ✅ @request-target = "get /path"
     derivedComponentLookup: (name: any) => {
       if (name === '@request-target') {
-        return request.url ?? null; // "/openai-voice-bot"
+        const method = ((request as any).method ?? 'GET').toLowerCase();
+        const url = request.url ?? '';
+        return `${method} ${url}`; // مثال: "get /openai-voice-bot"
       }
       return null;
     },
 
     keyResolver: async (parameters: SignatureParameters) => {
-      if (!parameters.nonce) return withFailure('PRECONDITION', 'Missing "nonce" signature parameter');
-      if (parameters.nonce.length < 22) return withFailure('PRECONDITION', 'Provided "nonce" signature parameter is too small');
+      if (!parameters.nonce) {
+        return withFailure('PRECONDITION', 'Missing "nonce" signature parameter');
+      }
+      if (parameters.nonce.length < 22) {
+        return withFailure('PRECONDITION', 'Provided "nonce" signature parameter is too small');
+      }
 
       const keyId = parameters.keyid;
-      if (!keyId) return withFailure('PRECONDITION', 'Missing "keyid" signature parameter');
+      if (!keyId) {
+        return withFailure('PRECONDITION', 'Missing "keyid" signature parameter');
+      }
 
       if (keyId !== apiKey) {
         return withFailure('PRECONDITION', 'X-API-KEY header field and signature keyid mismatch');
@@ -59,6 +67,7 @@ async function verifyRequestSignatureImpl(request: Request, secretService: Secre
     },
   });
 
+  // If client didn't sign, accept (optional behavior from original reference)
   if (result.code === 'UNSIGNED') {
     return { code: 'VERIFIED' };
   }
